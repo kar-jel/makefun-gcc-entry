@@ -1,10 +1,11 @@
 import { mkdir, rm, stat } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { join, resolve } from 'node:path';
+import { tmpdir } from 'node:os';
 
 export class GitStore {
   readonly root: string;
-  constructor(root = join(process.cwd(), 'state', 'git')) { this.root = resolve(root); }
+  constructor(root = join(process.env.MAKEFUN_STATE_DIR || join(tmpdir(), `forge-state-${process.pid}`), 'git')) { this.root = resolve(root); }
   private path(owner: string, repo: string) {
     const valid = /^[A-Za-z0-9_.-]+$/;
     if (!valid.test(owner) || !valid.test(repo) || owner === '.' || owner === '..' || repo === '.' || repo === '..') throw new Error('invalid repository path');

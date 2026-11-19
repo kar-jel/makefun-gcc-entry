@@ -1,12 +1,15 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { mkdirSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { executeGraphql } from './graphql.ts';
 import { handleMcpHttp } from './mcp.ts';
 import { handleGitHttp, gitStore } from './git/pack.ts';
 
-const ROOT = join(process.cwd(), 'state');
+const ROOT = process.env.MAKEFUN_STATE_DIR ?? join(tmpdir(), 'forge-state-' + process.pid);
+mkdirSync(ROOT, { recursive: true });
 const JSON_TYPE = 'application/json; charset=utf-8';
 type Obj = Record<string, any>;
 const repos = new Map<string, Obj>(), issues = new Map<string, Obj[]>(), pulls = new Map<string, Obj[]>(), labels = new Map<string, string[]>(), contents = new Map<string, Obj>();
@@ -17,7 +20,9 @@ async function persist(name:string,value:unknown){await mkdir(ROOT,{recursive:tr
 const id=(s:string)=>createHash('sha1').update(s).digest('hex');
 function ghRepo(o:string,r:string){return repos.get(key(o,r));}
 function repository(o:string,r:string):Obj {return ghRepo(o,r) ?? {id:parseInt(id(key(o,r)).slice(0,8),16),node_id:id(key(o,r)),name:r,full_name:key(o,r),owner:{login:o},private:false,description:null,default_branch:'main',html_url:`http://forge/${key(o,r)}`};}
-export function createApp():Server{return createServer(async(req,res)=>{const method=req.method??'GET';let path='/',q=new URL(req.url??'/', 'http://entry');path=q.pathname;
+let loaded=false;
+async function loadState(){if(loaded)return;loaded=true;try{const rows=JSON.parse(await readFile(join(ROOT,'repos.json'),'utf8'));for(const [k,v] of rows)repos.set(k,v);}catch{} }
+export function createApp():Server{return createServer(async(req,res)=>{await loadState();const method=req.method??'GET';let path='/',q=new URL(req.url??'/', 'http://entry');path=q.pathname;
 try {
 if(method==='GET'&&path==='/healthz')return send(res,200,{ok:true});
 const gm=path.match(/^\/([^/]+)\/([^/]+?)(?:\.git)?\/(info\/refs|git-upload-pack|git-receive-pack)$/);
