@@ -79,6 +79,10 @@ async function waitForDone(): Promise<void> {
 /** Bound the port, register it, then wait for the env: the whole life of the process. */
 async function main(): Promise<void> {
   const server = createApp();
+  // Latency: never let Nagle batch a response, and keep sockets around between requests.
+  server.keepAliveTimeout = 65_000;
+  server.headersTimeout = 66_000;
+  server.on('connection', (socket) => socket.setNoDelay(true));
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject);
     server.listen(0, () => resolve());
