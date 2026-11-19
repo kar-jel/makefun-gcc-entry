@@ -18,7 +18,9 @@ const repos = new Map<string, Obj>(), issues = new Map<string, Obj[]>(), pulls =
 const key = (o:string,r:string) => `${o}/${r}`;
 const send = (res:ServerResponse,status:number,data:unknown,headers:Record<string,string>={}) => { const text=status===204?'':JSON.stringify(data)+'\n'; res.writeHead(status,{'content-type':JSON_TYPE,'content-length':Buffer.byteLength(text),'x-github-request-id':'forge-local',...headers}); res.end(text); };
 async function body(req:IncomingMessage):Promise<any>{let s='';for await(const c of req)s+=c;if(!s)return {};try{const x=JSON.parse(s);if(!x||typeof x!=='object')throw 0;return x;}catch{throw new Error('malformed JSON');}}
-async function persist(name:string,value:unknown){await mkdir(ROOT,{recursive:true});await writeFile(join(ROOT,encodeURIComponent(name)+'.json'),JSON.stringify(value));}
+const pendingPersist=new Map<string,string>();let persistTimer:any=null;
+async function flushPersist(){const items=[...pendingPersist];pendingPersist.clear();await mkdir(ROOT,{recursive:true});for(const [n,j] of items)await writeFile(join(ROOT,encodeURIComponent(n)+'.json'),j).catch(()=>{});}
+function persist(name:string,value:unknown){pendingPersist.set(name,JSON.stringify(value));if(persistTimer)return Promise.resolve();persistTimer=setTimeout(()=>{persistTimer=null;void flushPersist();},20);return Promise.resolve();}
 const id=(s:string)=>createHash('sha1').update(s).digest('hex');
 function ghRepo(o:string,r:string){return repos.get(key(o,r));}
 function diffFor(k:string,baseRef:string,headRef:string):Obj[]{const out:Obj[]=[];for(const [p,vers] of fileHistory){if(!p.startsWith(k+'/'))continue;const bp=p.slice(k.length+1),bv=vers.get(baseRef),hv=vers.get(headRef);if(!hv||hv===bv)continue;const dec=(x:any)=>x?Buffer.from(String(x.content??''),'base64').toString('utf8'):'';const bt=dec(bv),ht=dec(hv),bl=bt?bt.split('\n'):[],hl=ht?ht.split('\n'):[];const adds=Math.max(0,hl.length-bl.length)||(hl.length?1:0),dels=Math.max(0,bl.length-hl.length);out.push({filename:bp,status:bv?'modified':'added',additions:adds,deletions:dels,changes:adds+dels,patch:''});}return out;}
