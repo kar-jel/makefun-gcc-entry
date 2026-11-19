@@ -26,7 +26,7 @@ export async function handleGitHttp(req: IncomingMessage, res: ServerResponse, o
       } else if (svc === 'git-receive-pack') {
         advertisement = Buffer.concat([pkt(`${'0'.repeat(40)} capabilities^{}\0 ${caps}\n`), flush]);
       } else {
-        const out = await store.run(['--git-dir', dir, 'upload-pack', '--stateless-rpc', '--advertise-refs', '.']);
+        const out = await store.run(['--git-dir', dir, 'upload-pack', '--stateless-rpc', '--advertise-refs', dir]);
         advertisement = out.stdout;
       }
       res.writeHead(200, { 'content-type': `application/x-${svc}-advertisement`, 'cache-control': 'no-cache' });
@@ -44,9 +44,9 @@ export async function handleGitHttp(req: IncomingMessage, res: ServerResponse, o
     const body = (req.headers['content-encoding'] || '').toLowerCase() === 'gzip' ? gunzipSync(raw) : raw;
     let stdout: Buffer;
     if (receive) {
-      stdout = (await store.run(['--git-dir', dir, 'receive-pack', '--stateless-rpc', '.'], body)).stdout;
+      stdout = (await store.run(['--git-dir', dir, 'receive-pack', '--stateless-rpc', dir], body)).stdout;
     } else {
-      stdout = (await store.run(['--git-dir', dir, 'upload-pack', '--stateless-rpc', '.'], body)).stdout;
+      stdout = (await store.run(['--git-dir', dir, 'upload-pack', '--stateless-rpc', dir], body)).stdout;
     }
     res.writeHead(200, { 'content-type': `application/x-${svc}-result`, 'cache-control': 'no-cache' });
     res.end(stdout);
