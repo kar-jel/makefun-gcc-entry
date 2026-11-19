@@ -21,7 +21,7 @@ export function createApp():Server{return createServer(async(req,res)=>{const me
 try {
 if(method==='GET'&&path==='/healthz')return send(res,200,{ok:true});
 const gm=path.match(/^\/([^/]+)\/([^/]+?)(?:\.git)?\/(info\/refs|git-upload-pack|git-receive-pack)$/);
-if(gm){const [,owner,repo]=gm;if(!ghRepo(owner,repo))return send(res,404,{message:'Not Found'});try{await gitStore.init(owner,repo,ghRepo(owner,repo)?.default_branch??'main');if(await handleGitHttp(req,res,owner,repo))return;}catch(e){return send(res,500,{message:e instanceof Error?e.message:'Git error'});}}
+if(gm){const [,owner,repo]=gm;const known=ghRepo(owner,repo);if(!known)return send(res,404,{message:'Not Found'});try{if(!await gitStore.exists(owner,repo))await gitStore.init(owner,repo,known.default_branch??'main');if(await handleGitHttp(req,res,owner,repo))return;}catch(e){return send(res,500,{message:e instanceof Error?e.message:'Git error'});}}
 if(path==='/api/v3'||path==='/api/v3/')return send(res,200,{current_user_url:'/api/v3/user'},{'x-oauth-scopes':'repo, read:org'});
 if(path==='/api/v3/meta')return send(res,200,{installed_version:'1.0.0'});
 if(path==='/api/graphql'&&method==='POST'){const b=await body(req);const result=executeGraphql(String(b.query??''),b.variables??{},{repos,issues,pulls});return send(res,200,result);}
