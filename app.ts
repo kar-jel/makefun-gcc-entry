@@ -2,6 +2,9 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
+import { executeGraphql } from './graphql.ts';
+import { handleMcpHttp } from './mcp.ts';
+import { handleGitHttp, gitStore } from './git/pack.ts';
 
 const ROOT = join(process.cwd(), 'state');
 const JSON_TYPE = 'application/json; charset=utf-8';
@@ -17,13 +20,16 @@ function repository(o:string,r:string):Obj {return ghRepo(o,r) ?? {id:parseInt(i
 export function createApp():Server{return createServer(async(req,res)=>{const method=req.method??'GET';let path='/',q=new URL(req.url??'/', 'http://entry');path=q.pathname;
 try {
 if(method==='GET'&&path==='/healthz')return send(res,200,{ok:true});
+const gm=path.match(/^\/([^/]+)\/([^/]+?)(?:\.git)?\/(info\/refs|git-upload-pack|git-receive-pack)$/);
+if(gm){const [,owner,repo]=gm;if(!ghRepo(owner,repo))return send(res,404,{message:'Not Found'});try{await gitStore.init(owner,repo,ghRepo(owner,repo)?.default_branch??'main');if(await handleGitHttp(req,res,owner,repo))return;}catch(e){return send(res,500,{message:e instanceof Error?e.message:'Git error'});}}
 if(path==='/api/v3'||path==='/api/v3/')return send(res,200,{current_user_url:'/api/v3/user'},{'x-oauth-scopes':'repo, read:org'});
 if(path==='/api/v3/meta')return send(res,200,{installed_version:'1.0.0'});
-if(path==='/api/graphql'&&method==='POST'){const b=await body(req);const query=String(b.query??'');const v=b.variables??{}; if(query.includes('__type'))return send(res,200,{data:{__type:{fields:['id','number','title','state','body','headRefName','baseRefName','mergeable','merged','files','databaseId','name','nameWithOwner','owner','defaultBranchRef','viewerPermission','hasIssuesEnabled','issue','issues','pullRequests','pullRequest'].map(name=>({name})),enumValues:[{name:'ISSUE'}]}}});let data:Obj={};for(const [name,value] of Object.entries(v))if(name.toLowerCase().includes('repo'))data.repository=null;if(/createIssue|createPull|createPullRequest/.test(query))data={createIssue:{issue:null},createPullRequest:{pullRequest:null}};return send(res,200,{data});}
-if(path==='/mcp'&&method==='POST'){const b=await body(req);const result=b.method==='initialize'?{protocolVersion:'2026-07-28',capabilities:{tools:{}},serverInfo:{name:'local-forge',version:'1'}}:b.method==='tools/list'?{tools:[['create_repo','Create repository'],['create_repository','Create repository'],['get_repo','Get repository'],['create_issue','Create issue'],['list_issues','List issues'],['create_pull_request','Create pull request'],['list_pulls','List pulls'],['merge_pull_request','Merge pull request']].map(([name,description])=>({name,description,inputSchema:{type:'object',properties:{name:{type:'string'},owner:{type:'string'},repo:{type:'string'},title:{type:'string'},body:{type:'string'},head:{type:'string'},base:{type:'string'},pull_number:{type:'number'}}}}))}:b.method==='tools/call'?{content:[{type:'text',text:'{}'}],structuredContent:{}}:{};return send(res,200,{jsonrpc:'2.0',id:b.id,result});}
+if(path==='/api/graphql'&&method==='POST'){const b=await body(req);const result=executeGraphql(String(b.query??''),b.variables??{},{repos,issues,pulls});return send(res,200,result);}
+if(path==='/mcp'&&method==='POST'){const b=await body(req);const result=handleMcpHttp(b,{repos,issues,pulls});if(result===null)return send(res,202,{});return send(res,200,result);}
+
 const user=process.env.MAKEFUN_SHOP_TOKEN||'user';
 if(path==='/api/v3/user/repos'&&method==='GET'){const all=[...repos.values()].filter(x=>x.owner.login===user),page=Number(q.searchParams.get('page')||1),per=Number(q.searchParams.get('per_page')||30),hdr=all.length>page*per?{'link':`<${path}?page=${page+1}&per_page=${per}>; rel="next"`}:{};return send(res,200,all.slice((page-1)*per,page*per),hdr);}
-if(path==='/api/v3/user/repos'&&method==='POST'){const b=await body(req),name=String(b.name??'');if(!name)return send(res,422,{message:'name required'});const repo={...repository(user,name),...b,id:parseInt(id(key(user,name)).slice(0,8),16),owner:{login:user},name,full_name:key(user,name),default_branch:'main'};repos.set(key(user,name),repo);await persist('repos', [...repos]);return send(res,201,repo);}
+if(path==='/api/v3/user/repos'&&method==='POST'){const b=await body(req),name=String(b.name??'');if(!name)return send(res,422,{message:'name required'});const repo={...repository(user,name),...b,id:parseInt(id(key(user,name)).slice(0,8),16),owner:{login:user},name,full_name:key(user,name),default_branch:'main'};repos.set(key(user,name),repo);await gitStore.init(user,name,repo.default_branch);await persist('repos', [...repos]);return send(res,201,repo);}
 const m=path.match(/^\/api\/v3\/repos\/([^/]+)\/([^/]+)(?:\/(.*))?$/);
 if(m){const [,o,r,tail='']=m,k=key(o,r),repo=ghRepo(o,r);if(!repo)return send(res,404,{message:'Not Found'});if(!tail){if(method==='GET')return send(res,200,repo);if(method==='PATCH'){const b=await body(req);Object.assign(repo,b);await persist('repos',[...repos]);return send(res,200,repo);}if(method==='DELETE'){repos.delete(k);await persist('repos',[...repos]);return send(res,204,{});}}
 if(tail==='labels'&&method==='POST'){const b=await body(req),name=String(b.name??'');if(!labels.has(k))labels.set(k,[]);labels.get(k)!.push(name);await persist(`labels-${k}`,labels.get(k));return send(res,201,{...b,name});}
