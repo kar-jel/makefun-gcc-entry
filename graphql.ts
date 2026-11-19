@@ -10,12 +10,11 @@ export function executeGraphql(query: string, variables: JsonObject = {}, state:
   if (!query.trim()) return { errors: [{ message: 'query is required' }] };
   if (/\bmutation\b/.test(query)) return { errors: [{ message: 'GraphQL mutation is not supported; use the REST API for writes' }] };
   const data: JsonObject = {};
-  const aliases = [...query.matchAll(/\b(repository|viewer|node|organization|user)\s*(?:\(([^)]*)\))?\s*\{/g)];
+  const aliases = [...query.matchAll(/(?:([A-Za-z_]\w*)\s*:\s*)?(repository|viewer|node|organization|user)\s*(?:\(([^)]*)\))?\s*\{/g)];
   for (const match of aliases) {
-    const kind = match[1], args = match[2] || '';
+    const [, alias, kind, args = ''] = match;
     const arg = (name: string) => args.match(new RegExp(`${name}\\s*:\\s*(?:\\$([\\w]+)|"([^"]*)")`));
     const val = (name: string) => { const m = arg(name); return m ? (m[1] ? variables[m[1]] : m[2]) : undefined; };
-    const alias = args.match(/^\s*(\w+)\s*:/)?.[1];
     const field = alias || kind;
     if (kind === 'repository') {
       const owner = id(val('owner')), name = id(val('name'));
