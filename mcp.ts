@@ -12,8 +12,8 @@ function invoke(name:string,a:Obj,s:McpState):unknown {
  if(name==='create_repo'||name==='create_repository'){if(!repo)throw rpcError(-32602,'name is required');if(s.repos.has(key))throw rpcError(-32000,'repository already exists');const value={id:s.repos.size+1,name:repo,full_name:key,owner:{login:owner},private:!!a.private,description:a.description??null,default_branch:'main'};s.repos.set(key,value);return value;}
  if(!repo)throw rpcError(-32602,'repo is required');if(!s.repos.has(key))throw rpcError(-32004,'repository not found');
  if(name==='get_repo')return s.repos.get(key)!;
- if(name==='create_issue'){if(!a.title)throw rpcError(-32602,'title is required');const list=s.issues.get(key)||[],item={id:list.length+1,number:list.length+1,title:a.title,body:a.body??'',state:'open',user:{login:owner},labels:[]};list.push(item);s.issues.set(key,list);return item;}
- if(name==='list_issues')return s.issues.get(key)||[];
+ if(name==='create_issue'){if(!a.title)throw rpcError(-32602,'title is required');const list=s.issues.get(key)||[],item={id:list.length+1,number:list.length+1,title:a.title,body:a.body??'',state:'open',user:{login:owner},labels:[],comments:0};list.push(item);s.issues.set(key,list);return item;}
+ if(name==='list_issues')return (s.issues.get(key)||[]).filter(x=>!a.state||a.state==='all'||x.state===a.state);
  if(name==='create_pull_request'){if(!a.title||!a.head||!a.base)throw rpcError(-32602,'title, head and base are required');const list=s.pulls.get(key)||[],item={id:list.length+1,number:list.length+1,title:a.title,body:a.body??'',state:'open',head:{ref:a.head},base:{ref:a.base},merged:false};list.push(item);s.pulls.set(key,list);return item;}
  if(name==='list_pulls')return s.pulls.get(key)||[];
  if(name==='merge_pull_request'){const item=(s.pulls.get(key)||[]).find(x=>x.number===Number(a.pull_number));if(!item)throw rpcError(-32004,'pull request not found');item.merged=true;item.state='closed';return {merged:true,message:'Pull Request successfully merged'};}

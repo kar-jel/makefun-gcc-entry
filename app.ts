@@ -32,10 +32,10 @@ if(gm){const [,owner,repo]=gm;const known=ghRepo(owner,repo);if(!known)return se
 if(path.startsWith('/api/v3/')&&path!='/api/v3/meta'&&!req.headers.authorization)return send(res,401,{message:'Requires authentication'});
 const authLogin=String(req.headers.authorization??'').replace(/^Bearer\s+/i,'');
 if((path==='/api/v3'||path==='/api/v3/'))return send(res,200,{current_user_url:'/api/v3/user'},{'x-oauth-scopes':'repo, read:org'});
-if(path==='/api/v3/user'&&method==='GET')return send(res,200,{login:authLogin});
+if(path==='/api/v3/user'&&method==='GET')return send(res,200,{login:'adaiversen'});
 if(path==='/api/v3/meta')return send(res,200,{installed_version:'1.0.0'});
 if(path==='/api/graphql'&&method==='POST'){const b=await body(req);const result=executeGraphql(String(b.query??''),b.variables??{},{repos,issues,pulls});return send(res,200,result);}
-if(path==='/mcp'&&method==='POST'){const b=await body(req);const result=handleMcpHttp(b,{repos,issues,pulls});if(result===null)return send(res,202,{});return send(res,200,result);}
+if(path==='/mcp'&&method==='POST'){if(!req.headers.authorization)return send(res,401,{message:'Requires authentication'});let b:Obj;try{b=await body(req);}catch{return send(res,400,{jsonrpc:'2.0',id:null,error:{code:-32700,message:'Parse error'}});}const result=handleMcpHttp(b,{repos,issues,pulls});if(result===null)return send(res,202,{});return send(res,200,result);}
 
 const user='adaiversen';
 if(path==='/api/v3/user/repos'&&method==='GET'){const all=[...repos.values()].filter(x=>x.owner.login===user),page=Number(q.searchParams.get('page')||1),per=Number(q.searchParams.get('per_page')||30),hdr=all.length>page*per?{'link':`<${path}?page=${page+1}&per_page=${per}>; rel="next"`}:{};return send(res,200,all.slice((page-1)*per,page*per),hdr);}
