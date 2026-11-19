@@ -2,7 +2,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { gunzipSync } from 'node:zlib';
 import { gitStore, type GitStore } from './store.ts';
 
-const pkt = (s: string) => Buffer.from(`${(s.length + 4).toString(16).padStart(4, '0')}${s}`);
+const pkt = (s: string) => Buffer.from(`${(Buffer.byteLength(s) + 4).toString(16).padStart(4, '0')}${s}`);
 const flush = Buffer.from('0000');
 const service = (name: string) => Buffer.concat([pkt(`# service=${name}\n`), flush]);
 export async function handleGitHttp(req: IncomingMessage, res: ServerResponse, owner: string, repo: string, store: GitStore = gitStore): Promise<boolean> {
@@ -42,10 +42,14 @@ export async function handleGitHttp(req: IncomingMessage, res: ServerResponse, o
     for await (const b of req) bufs.push(Buffer.from(b));
     const raw = Buffer.concat(bufs);
     const body = (req.headers['content-encoding'] || '').toLowerCase() === 'gzip' ? gunzipSync(raw) : raw;
-    const { stdout } = await store.run(['--git-dir', dir, receive ? 'receive-pack' : 'upload-pack', '--stateless-rpc', '.'], body);
-    if (receive) await store.run(['--git-dir', dir, 'config', 'http.receivepack', 'true']);
+    let stdout: Buffer;
+    if (receive) {
+      stdout = (await store.run(['--git-dir', dir, 'receive-pack', '--stateless-rpc', '.'], body)).stdout;
+    } else {
+      stdout = (await store.run(['--git-dir', dir, 'upload-pack', '--stateless-rpc', '.'], body)).stdout;
+    }
     res.writeHead(200, { 'content-type': `application/x-${svc}-result`, 'cache-control': 'no-cache' });
-    if (receive) res.end(stdout); else res.end(stdout);
+    res.end(stdout);
   } catch (e) { res.writeHead(400, { 'content-type': 'text/plain' }); res.end(String(e)); }
   return true;
 }
