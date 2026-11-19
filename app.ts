@@ -17,7 +17,7 @@ const branches = new Map<string, Map<string,string>>(), commitData = new Map<str
 const repos = new Map<string, Obj>(), issues = new Map<string, Obj[]>(), pulls = new Map<string, Obj[]>(), labels = new Map<string, string[]>(), contents = new Map<string, Obj>(), fileHistory = new Map<string, Map<string,Obj>>();
 const key = (o:string,r:string) => `${o}/${r}`;
 const send = (res:ServerResponse,status:number,data:unknown,headers:Record<string,string>={}) => { const text=status===204?'':JSON.stringify(data)+'\n'; res.writeHead(status,{'content-type':JSON_TYPE,'content-length':Buffer.byteLength(text),'x-github-request-id':'forge-local',...headers}); res.end(text); };
-async function body(req:IncomingMessage):Promise<Obj>{let s='';for await(const c of req)s+=c;if(!s)return {};try{const x=JSON.parse(s);if(!x||typeof x!=='object'||Array.isArray(x))throw 0;return x;}catch{throw new Error('malformed JSON');}}
+async function body(req:IncomingMessage):Promise<any>{let s='';for await(const c of req)s+=c;if(!s)return {};try{const x=JSON.parse(s);if(!x||typeof x!=='object')throw 0;return x;}catch{throw new Error('malformed JSON');}}
 async function persist(name:string,value:unknown){await mkdir(ROOT,{recursive:true});await writeFile(join(ROOT,encodeURIComponent(name)+'.json'),JSON.stringify(value));}
 const id=(s:string)=>createHash('sha1').update(s).digest('hex');
 function ghRepo(o:string,r:string){return repos.get(key(o,r));}
@@ -34,7 +34,7 @@ const authLogin=String(req.headers.authorization??'').replace(/^Bearer\s+/i,'');
 if((path==='/api/v3'||path==='/api/v3/'))return send(res,200,{current_user_url:'/api/v3/user'},{'x-oauth-scopes':'repo, read:org'});
 if(path==='/api/v3/user'&&method==='GET')return send(res,200,{login:'adaiversen'});
 if(path==='/api/v3/meta')return send(res,200,{installed_version:'1.0.0'});
-if(path==='/api/graphql'&&method==='POST'){const b=await body(req);const result=executeGraphql(String(b.query??''),b.variables??{},{repos,issues,pulls});return send(res,200,result);}
+if(path==='/api/graphql'&&method==='POST'){if(!req.headers.authorization)return send(res,401,{message:'Requires authentication'});const b=await body(req);const run=(x:Obj)=>executeGraphql(String(x.query??''),x.variables??{},{repos,issues,pulls});const result=Array.isArray(b)?b.map(run):run(b);return send(res,200,result);}
 if(path==='/mcp'&&method==='POST'){if(!req.headers.authorization)return send(res,401,{message:'Requires authentication'});let b:Obj;try{b=await body(req);}catch{return send(res,400,{jsonrpc:'2.0',id:null,error:{code:-32700,message:'Parse error'}});}const result=handleMcpHttp(b,{repos,issues,pulls});if(result===null)return send(res,202,{});return send(res,200,result);}
 
 const user='adaiversen';

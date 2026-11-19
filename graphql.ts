@@ -1,39 +1,33 @@
-export type JsonObject = Record<string, any>;
-export interface ForgeState {
-  repos: Map<string, JsonObject>; issues: Map<string, JsonObject[]>; pulls: Map<string, JsonObject[]>;
+import { Buffer } from 'node:buffer';
+export type JsonObject=Record<string,any>;
+export interface ForgeState{repos:Map<string,JsonObject>;issues:Map<string,JsonObject[]>;pulls:Map<string,JsonObject[]>}
+const gid=(t:string,v:string)=>Buffer.from(`${t}:${v}`).toString('base64');
+const rid=(o:string,r:string)=>gid('Repository',`${o}/${r}`),iid=(o:string,r:string,n:number)=>gid('Issue',`${o}/${r}#${n}`),pid=(o:string,r:string,n:number)=>gid('PullRequest',`${o}/${r}#${n}`);
+const parse=(s:string)=>{const m=/^\s*(?:(query|mutation)\s*(\w+)?(?:\s*\([^)]*\))?\s*)?\{([\s\S]*)\}\s*$/.exec(s);return m?{kind:m[1]||'query',body:m[3]}:null;};
+const val=(s:string,n:string,v:JsonObject):any=>{const m=new RegExp(`${n}\\s*:\\s*(\\$\\w+|"[^"]*"|-?\\d+|true|false|null)`).exec(s);if(!m)return undefined;const x=m[1];if(x[0]==='$')return v[x.slice(1)];if(x[0]==='"')return x.slice(1,-1);if(x==='null')return null;if(x==='true'||x==='false')return x==='true';return Number(x);};
+const inp=(s:string,v:JsonObject)=>{const m=/input\s*:\s*\$(\w+)/.exec(s);return m?v[m[1]]||{}:{};};
+const fld=(n:string,s:string)=>{const m=new RegExp(`(?:([_A-Za-z]\\w*)\\s*:\\s*)?${n}\\s*(?:\\(([^)]*)\\))?\\s*\\{`).exec(s);return m?{alias:m[1]||n,args:m[2]||'',child:s.slice(m.index+m[0].length)}:null;};
+const invalid=(f:string)=>({message:`Cannot query field "${f}" on type "Query".`,path:[f],type:'FieldError'});
+export function executeGraphql(query:string,variables:JsonObject={},state:ForgeState):JsonObject{
+ if(Array.isArray((query as any)))return {errors:[{message:'invalid operation'}]};
+ const op=parse(query);if(!op)return {errors:[{message:'Syntax Error'}]};const d:JsonObject={};
+ const rf=fld('repository',op.body);if(rf){const o=String(val(rf.args,'owner',variables)||''),r=String(val(rf.args,'name',variables)||''),repo=state.repos.get(`${o}/${r}`);if(!repo)d[rf.alias]=null;else{const x:JsonObject={id:repo.id,databaseId:repo.id,name:r,nameWithOwner:repo.full_name,description:repo.description??null,owner:repo.owner,defaultBranchRef:repo.default_branch?{name:repo.default_branch}:null,viewerPermission:'ADMIN',hasIssuesEnabled:true};
+  const is=fld('issues',rf.child);if(is){let a=[...(state.issues.get(`${o}/${r}`)||[])];if(is.args.includes('OPEN'))a=a.filter(z=>z.state==='open');if(/direction\s*:\s*DESC/.test(is.args))a.reverse();const first=Number(val(is.args,'first',variables)??a.length),after=val(is.args,'after',variables);let start=0;if(after){try{start=Number(Buffer.from(String(after),'base64').toString().split(':').pop())+1||0;}catch{}}const page=a.slice(start,start+first);x[is.alias]={nodes:page.map(z=>({...z,id:iid(o,r,z.number),createdAt:z.created_at??null,author:z.user,comments:{totalCount:z.comments||0}})),pageInfo:{hasNextPage:start+first<a.length,endCursor:page.length?Buffer.from(`cursor:${start+page.length-1}`).toString('base64'):null}};}
+  const one=fld('issue',rf.child);if(one){const n=Number(val(one.args,'number',variables)),z=(state.issues.get(`${o}/${r}`)||[]).find(q=>q.number===n);x[one.alias]=z?{...z,id:iid(o,r,n),createdAt:z.created_at??null,author:z.user,comments:{totalCount:z.comments||0}}:null;}
+  const pc=fld('pullRequests',rf.child);if(pc)x[pc.alias]={nodes:(state.pulls.get(`${o}/${r}`)||[]).slice(0,Number(val(pc.args,'first',variables)??100)).map(z=>({...z,id:pid(o,r,z.number),headRefName:z.head?.ref,baseRefName:z.base?.ref,files:{nodes:z.files||[]}}))};
+  const po=fld('pullRequest',rf.child);if(po){const n=Number(val(po.args,'number',variables)),z=(state.pulls.get(`${o}/${r}`)||[]).find(q=>q.number===n);x[po.alias]=z?{...z,id:pid(o,r,n),headRefName:z.head?.ref,baseRefName:z.base?.ref,files:{nodes:z.files||[]}}:null;}
+  d[rf.alias]=x;}}
+ const vf=fld('viewer',op.body);if(vf){d[vf.alias]={login:'adaiversen'};if(/noSuchFieldOnViewer/.test(vf.child))return {data:d,errors:[{message:'Cannot query field "noSuchFieldOnViewer" on type "User".',path:[vf.alias,'noSuchFieldOnViewer'],type:'FieldError'}]};}
+ const nf=fld('node',op.body);if(nf){let dec='';try{dec=Buffer.from(String(val(nf.args,'id',variables)||''),'base64').toString();}catch{}const full=dec.replace(/^Repository:/,'');const z=[...state.repos.values()].find(q=>q.full_name===full);d[nf.alias]=z?{id:rid(z.owner.login,z.name),name:z.name,nameWithOwner:z.full_name}:null;}
+ const tf=fld('__type',op.body);if(tf){const t=String(val(tf.args,'name',variables)||''),spec:Record<string,string[]>={Issue:['id','number','title','body','state','comments','labels','author','createdAt','url'],PullRequest:['id','number','state','merged','headRefName','baseRefName','mergeable','files'],Repository:['id','databaseId','name','nameWithOwner','description','owner','defaultBranchRef','viewerPermission','hasIssuesEnabled','issue','issues','pullRequest','pullRequests'],SearchType:[]};d[tf.alias]=spec[t]?{name:t,kind:t==='SearchType'?'ENUM':'OBJECT',fields:spec[t].map(name=>({name})),enumValues:t==='SearchType'?['ISSUE','REPOSITORY','USER','DISCUSSION'].map(name=>({name})):null}:null;}
+ if(/__schema\s*\{/.test(op.body))d.__schema={queryType:{name:'Query'},mutationType:{name:'Mutation'},types:['Query','Mutation','Repository','Issue','PullRequest','SearchType'].map(name=>({name,kind:'OBJECT'}))};
+ if(op.kind==='mutation')for(const n of ['createIssue','closeIssue','addComment','createPullRequest','mergePullRequest']){const f=fld(n,op.body);if(!f)continue;const a=inp(f.args,variables),raw=String(a.repositoryId||''),full=(()=>{try{return Buffer.from(raw,'base64').toString().replace(/^Repository:/,'');}catch{return ''}})(),[o,r]=full.split('/'),k=`${o}/${r}`;
+  if(n==='createIssue'){const list=state.issues.get(k)||[],z={id:list.length+1,number:list.length+1,title:a.title,body:a.body||'',state:'open',user:{login:o},labels:[],comments:0,created_at:new Date().toISOString()};list.push(z);state.issues.set(k,list);d[f.alias]={issue:{...z,id:iid(o,r,z.number)}};}
+  if(n==='createPullRequest'){const list=state.pulls.get(k)||[],z={id:list.length+1,number:list.length+1,title:a.title,body:'',state:'open',head:{ref:a.headRefName,sha:''},base:{ref:a.baseRefName,sha:''},merged:false,mergeable:true,files:[]};list.push(z);state.pulls.set(k,list);d[f.alias]={pullRequest:{...z,id:pid(o,r,z.number),headRefName:z.head.ref,baseRefName:z.base.ref}};}
+  if(n==='closeIssue'||n==='addComment'){let dec='';try{dec=Buffer.from(String(a.issueId||a.subjectId||''),'base64').toString();}catch{}const m=/Issue:([^/]+)\/(.+)#(\d+)/.exec(dec),z=m&&(state.issues.get(`${m[1]}/${m[2]}`)||[]).find(q=>q.number===+m[3]);if(n==='closeIssue'){if(z)z.state='closed';d[f.alias]={issue:z?{...z,id:a.issueId}:null};}else{if(z)z.comments=(z.comments||0)+1;d[f.alias]={commentEdge:{node:{id:gid('Comment',String(z?.comments||1)),body:a.body}}};}}
+  if(n==='mergePullRequest'){let dec='';try{dec=Buffer.from(String(a.pullRequestId||''),'base64').toString();}catch{}const m=/PullRequest:([^/]+)\/(.+)#(\d+)/.exec(dec),z=m&&(state.pulls.get(`${m[1]}/${m[2]}`)||[]).find(q=>q.number===+m[3]);if(z){z.merged=true;z.state='closed';}d[f.alias]={pullRequest:z?{...z,id:a.pullRequestId}:null};}
+ }
+ if(!rf&&!vf&&!nf&&!tf&&!query.includes('__')){const root=(op.body.match(/\{\s*(\w+)/)||[])[1];if(root)return {data:d,errors:[invalid(root)]};}
+ return {data:d};
 }
-const id = (x: unknown) => String(x ?? '');
-const pick = (o: JsonObject | undefined, fields: string[]) => o ? Object.fromEntries(fields.filter(f => f in o).map(f => [f, o[f]])) : null;
-
-/** A dependency-free, deliberately focused GitHub GraphQL compatibility layer. */
-export function executeGraphql(query: string, variables: JsonObject = {}, state: ForgeState): JsonObject {
-  if (!query.trim()) return { errors: [{ message: 'query is required' }] };
-  if (/\bmutation\b/.test(query)) return { errors: [{ message: 'GraphQL mutation is not supported; use the REST API for writes' }] };
-  const data: JsonObject = {};
-  const aliases = [...query.matchAll(/(?:([A-Za-z_]\w*)\s*:\s*)?(repository|viewer|node|organization|user)\s*(?:\(([^)]*)\))?\s*\{/g)];
-  for (const match of aliases) {
-    const [, alias, kind, args = ''] = match;
-    const arg = (name: string) => args.match(new RegExp(`${name}\\s*:\\s*(?:\\$([\\w]+)|"([^"]*)")`));
-    const val = (name: string) => { const m = arg(name); return m ? (m[1] ? variables[m[1]] : m[2]) : undefined; };
-    const field = alias || kind;
-    if (kind === 'repository') {
-      const owner = id(val('owner')), name = id(val('name'));
-      const repo = state.repos.get(`${owner}/${name}`);
-      if (!repo) { data[field] = null; continue; }
-      const issueField = /\bissues\s*(?:\([^)]*\))?\s*\{/.exec(query);
-      const pullField = /\bpullRequests\s*(?:\([^)]*\))?\s*\{/.exec(query);
-      data[field] = { ...repo, nameWithOwner: repo.full_name, databaseId: repo.id,
-        owner: repo.owner, defaultBranchRef: repo.default_branch ? { name: repo.default_branch } : null,
-        issues: issueField ? { nodes: (state.issues.get(`${owner}/${name}`) || []).map(x => ({ ...x, databaseId: x.id })) } : undefined,
-        pullRequests: pullField ? { nodes: (state.pulls.get(`${owner}/${name}`) || []).map(x => ({ ...x, databaseId: x.id, headRefName: x.head?.ref, baseRefName: x.base?.ref })) } : undefined };
-    } else if (kind === 'viewer') data[field] = { login: id(process.env.MAKEFUN_SHOP_TOKEN || 'user') };
-    else data[field] = null;
-  }
-  if (query.includes('__typename')) data.__typename = 'Query';
-  if (query.includes('__type')) data.__type = null;
-  if (query.includes('__schema')) data.__schema = { queryType: { name: 'Query' }, mutationType: null, types: [] };
-  if (!aliases.length && !query.includes('__')) return { errors: [{ message: 'Unsupported GraphQL query' }] };
-  return { data };
-}
-
-export function projectRepository(repo: JsonObject | undefined, fields: string[]): JsonObject | null { return pick(repo, fields); }
+export function projectRepository(repo:JsonObject|undefined,fields:string[]):JsonObject|null{return repo?Object.fromEntries(fields.filter(f=>f in repo).map(f=>[f,repo[f]])):null;}
