@@ -27,16 +27,19 @@ try {
 if(method==='GET'&&path==='/healthz')return send(res,200,{ok:true});
 const gm=path.match(/^\/([^/]+)\/([^/]+?)(?:\.git)?\/(info\/refs|git-upload-pack|git-receive-pack)$/);
 if(gm){const [,owner,repo]=gm;const known=ghRepo(owner,repo);if(!known)return send(res,404,{message:'Not Found'});try{if(!await gitStore.exists(owner,repo))await gitStore.init(owner,repo,known.default_branch??'main');if(await handleGitHttp(req,res,owner,repo))return;}catch(e){return send(res,500,{message:e instanceof Error?e.message:'Git error'});}}
-if(path==='/api/v3'||path==='/api/v3/')return send(res,200,{current_user_url:'/api/v3/user'},{'x-oauth-scopes':'repo, read:org'});
+if(path.startsWith('/api/v3/')&&path!='/api/v3/meta'&&!req.headers.authorization)return send(res,401,{message:'Requires authentication'});
+const authLogin=String(req.headers.authorization??'').replace(/^Bearer\s+/i,'');
+if((path==='/api/v3'||path==='/api/v3/'))return send(res,200,{current_user_url:'/api/v3/user'},{'x-oauth-scopes':'repo, read:org'});
+if(path==='/api/v3/user'&&method==='GET')return send(res,200,{login:authLogin});
 if(path==='/api/v3/meta')return send(res,200,{installed_version:'1.0.0'});
 if(path==='/api/graphql'&&method==='POST'){const b=await body(req);const result=executeGraphql(String(b.query??''),b.variables??{},{repos,issues,pulls});return send(res,200,result);}
 if(path==='/mcp'&&method==='POST'){const b=await body(req);const result=handleMcpHttp(b,{repos,issues,pulls});if(result===null)return send(res,202,{});return send(res,200,result);}
 
-const user=process.env.MAKEFUN_SHOP_TOKEN||'user';
+const user=authLogin;
 if(path==='/api/v3/user/repos'&&method==='GET'){const all=[...repos.values()].filter(x=>x.owner.login===user),page=Number(q.searchParams.get('page')||1),per=Number(q.searchParams.get('per_page')||30),hdr=all.length>page*per?{'link':`<${path}?page=${page+1}&per_page=${per}>; rel="next"`}:{};return send(res,200,all.slice((page-1)*per,page*per),hdr);}
 if(path==='/api/v3/user/repos'&&method==='POST'){const b=await body(req),name=String(b.name??'');if(!name)return send(res,422,{message:'name required'});const repo={...repository(user,name),...b,id:parseInt(id(key(user,name)).slice(0,8),16),owner:{login:user},name,full_name:key(user,name),default_branch:'main'};repos.set(key(user,name),repo);await gitStore.init(user,name,repo.default_branch);await persist('repos', [...repos]);return send(res,201,repo);}
 const m=path.match(/^\/api\/v3\/repos\/([^/]+)\/([^/]+)(?:\/(.*))?$/);
-if(m){const [,o,r,tail='']=m,k=key(o,r),repo=ghRepo(o,r);if(!repo)return send(res,404,{message:'Not Found'});if(!tail){if(method==='GET')return send(res,200,repo);if(method==='PATCH'){const b=await body(req);Object.assign(repo,b);await persist('repos',[...repos]);return send(res,200,repo);}if(method==='DELETE'){repos.delete(k);await persist('repos',[...repos]);return send(res,204,{});}}
+if(m){const [,o,r,tail='']=m,k=key(o,r),repo=ghRepo(o,r);if(o!==user||!repo)return send(res,404,{message:'Not Found'});if(!tail){if(method==='GET')return send(res,200,repo);if(method==='PATCH'){const b=await body(req);Object.assign(repo,b);await persist('repos', [...repos]);return send(res,200,repo);}if(method==='DELETE'){repos.delete(k);await gitStore.remove(o,r);await persist('repos', [...repos]);return send(res,204,{});}}
 if(tail==='labels'&&method==='POST'){const b=await body(req),name=String(b.name??'');if(!labels.has(k))labels.set(k,[]);labels.get(k)!.push(name);await persist(`labels-${k}`,labels.get(k));return send(res,201,{...b,name});}
 if(tail==='issues'&&method==='POST'){const b=await body(req);if((b.labels??[]).some((l:any)=>!labels.get(k)?.includes(typeof l==='string'?l:l.name)))return send(res,422,{message:'Validation Failed'});const a=issues.get(k)??[],item={...b,id:parseInt(id(k+'issue'+a.length).slice(0,8),16),number:a.length+1,state:'open',user:{login:user},labels:b.labels??[]};a.push(item);issues.set(k,a);await persist(`issues-${k}`,a);return send(res,201,item);}
 const im=tail.match(/^issues\/(\d+)$/);if(im&&method==='GET'){const it=issues.get(k)?.find(x=>x.number===+im[1]);return it?send(res,200,it):send(res,404,{message:'Not Found'});}
