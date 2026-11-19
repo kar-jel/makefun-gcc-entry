@@ -1,36 +1,31 @@
-import { mkdir, rm, stat } from 'node:fs/promises';
-import { spawn } from 'node:child_process';
+import { mkdir, rm, stat, readFile, writeFile, readdir, unlink } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
-
-export class GitStore {
-  readonly root: string;
-  constructor(root = join(process.env.MAKEFUN_STATE_DIR || join(tmpdir(), `forge-state-${process.pid}`), 'git')) { this.root = resolve(root); }
-  private path(owner: string, repo: string) {
-    const valid = /^[A-Za-z0-9_.-]+$/;
-    if (!valid.test(owner) || !valid.test(repo) || owner === '.' || owner === '..' || repo === '.' || repo === '..') throw new Error('invalid repository path');
-    return join(this.root, owner, `${repo}.git`);
-  }
-  async exists(owner: string, repo: string) {
-    try { return (await stat(join(this.path(owner, repo), 'HEAD'))).isFile(); } catch { return false; }
-  }
-  async init(owner: string, repo: string, defaultBranch = 'main') {
-    const dir = this.path(owner, repo);
-    await mkdir(join(this.root, owner), { recursive: true });
-    if (!await this.exists(owner, repo)) await this.run(['init', '--bare', '--initial-branch', defaultBranch, dir]);
-    await this.run(['--git-dir', dir, 'config', 'http.receivepack', 'true']);
-    return dir;
-  }
-  async run(args: string[], input?: Buffer) {
-    return new Promise<{ stdout: Buffer; stderr: Buffer }>((resolvePromise, reject) => {
-      const p = spawn('git', args, { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_TERMINAL_PROMPT: '0' } });
-      const out: Buffer[] = [], err: Buffer[] = [];
-      p.stdout.on('data', b => out.push(b)); p.stderr.on('data', b => err.push(b));
-      p.on('error', reject); p.on('close', code => code === 0 ? resolvePromise({ stdout: Buffer.concat(out), stderr: Buffer.concat(err) }) : reject(new Error(Buffer.concat(err).toString() || `git exited ${code}`)));
-      if (input) p.stdin.end(input); else p.stdin.end();
-    });
-  }
-  async remove(owner: string, repo: string) { await rm(this.path(owner, repo), { recursive: true, force: true }); }
-  dir(owner: string, repo: string) { return this.path(owner, repo); }
+import { createHash } from 'node:crypto';
+import { deflateSync, inflateSync, constants } from 'node:zlib';
+import { Buffer } from 'node:buffer';
+export type ObjType='commit'|'tree'|'blob'|'tag';
+const TYPE:Record<ObjType,number>={commit:1,tree:2,blob:3,tag:4}, NTYPE:Record<number,ObjType>={1:'commit',2:'tree',3:'blob',4:'tag'};
+const sha=(b:Buffer)=>createHash('sha1').update(b).digest('hex');const rawObject=(type:ObjType,data:Buffer)=>Buffer.concat([Buffer.from(`${type} ${data.length}\0`),data]);
+export function objectId(type:ObjType,data:Buffer){return sha(rawObject(type,data));}
+export function packSize(size:number,type:number){const a:number[]=[];let b=(size&15)|(type<<4);size=Math.floor(size/16);if(size)b|=128;a.push(b);while(size){b=size&127;size=Math.floor(size/128);if(size)b|=128;a.push(b);}return Buffer.from(a);}
+function readVar(b:Buffer,p:{i:number}){let n=0,s=0,x:number;do{x=b[p.i++];n|=(x&127)<<s;s+=7;}while(x&128);return n;}
+export function applyDelta(base:Buffer,d:Buffer){let p={i:0};if(readVar(d,p)!==base.length)throw Error('delta base size mismatch');const target=readVar(d,p),out:Buffer[]=[];let len=0;while(p.i<d.length){const c=d[p.i++];if(c&128){let o=0,n=0;if(c&1)o|=d[p.i++];if(c&2)o|=d[p.i++]<<8;if(c&4)o|=d[p.i++]<<16;if(c&8)o|=d[p.i++]<<24;if(c&16)n|=d[p.i++];if(c&32)n|=d[p.i++]<<8;if(c&64)n|=d[p.i++]<<16;if(!n)n=65536;const v=base.subarray(o,o+n);out.push(v);len+=v.length;}else if(c){const v=d.subarray(p.i,p.i+c);p.i+=c;out.push(v);len+=v.length;}else throw Error('bad delta opcode');}if(len!==target)throw Error('delta target size mismatch');return Buffer.concat(out);}
+export class GitStore{
+ readonly root:string;constructor(root=join(process.env.MAKEFUN_STATE_DIR||join(tmpdir(),`forge-state-${process.pid}`),'git')){this.root=resolve(root);}
+ private path(o:string,r:string){if(!/^[A-Za-z0-9_.-]+$/.test(o)||!/^[A-Za-z0-9_.-]+$/.test(r)||o==='..'||r==='..')throw Error('invalid repository path');return join(this.root,o,`${r}.git`);}
+ dir(o:string,r:string){return this.path(o,r);}async exists(o:string,r:string){try{return(await stat(join(this.path(o,r),'HEAD'))).isFile();}catch{return false;}}
+ async init(o:string,r:string,branch='main'){const d=this.path(o,r);await mkdir(join(d,'objects','info'),{recursive:true});await mkdir(join(d,'objects','pack'),{recursive:true});await mkdir(join(d,'refs','heads'),{recursive:true});await mkdir(join(d,'refs','tags'),{recursive:true});try{await stat(join(d,'HEAD'));}catch{await writeFile(join(d,'HEAD'),`ref: refs/heads/${branch}\n`);}return d;}
+ async remove(o:string,r:string){await rm(this.path(o,r),{recursive:true,force:true});}
+ async writeObject(o:string,r:string,type:ObjType,data:Buffer){const raw=rawObject(type,data),id=sha(raw),d=this.path(o,r),p=join(d,'objects',id.slice(0,2),id.slice(2));await mkdir(join(d,'objects',id.slice(0,2)),{recursive:true});await writeFile(p,deflateSync(raw));return id;}
+ async readObject(o:string,r:string,id:string){const c=inflateSync(await readFile(join(this.path(o,r),'objects',id.slice(0,2),id.slice(2)))),z=c.indexOf(0),m=/^(commit|tree|blob|tag) (\d+)$/.exec(c.subarray(0,z).toString());if(!m||Number(m[2])!==c.length-z-1||sha(c)!==id)throw Error('corrupt object');return{type:m[1] as ObjType,content:c.subarray(z+1)};}
+ async listObjects(o:string,r:string){const root=join(this.path(o,r),'objects'),a:string[]=[];for(const x of await readdir(root).catch(()=>[])){if(/^[0-9a-f]{2}$/.test(x))for(const y of await readdir(join(root,x)).catch(()=>[]))if(/^[0-9a-f]{38}$/.test(y))a.push(x+y);}return a;}
+ async refsMap(o:string,r:string){const d=this.path(o,r),m=new Map<string,string>();const walk=async(dir:string,prefix:string)=>{for(const e of await readdir(dir,{withFileTypes:true}).catch(()=>[])){const n=prefix+e.name,p=join(dir,e.name);if(e.isDirectory())await walk(p,n+'/');else{const id=(await readFile(p,'utf8')).trim();if(/^[0-9a-f]{40}$/.test(id))m.set(n,id);}}};await walk(join(d,'refs'),'refs/');const head=(await readFile(join(d,'HEAD'),'utf8').catch(()=>'' )).trim();if(head.startsWith('ref: ')){const ref=head.slice(5);if(m.has(ref))m.set('HEAD',m.get(ref)!);else m.set('HEAD','');}return m;}
+ async updateRef(o:string,r:string,ref:string,id:string){if(!/^refs\/(heads|tags)\/[\w./-]+$/.test(ref)||ref.includes('..'))throw Error('bad ref');const p=join(this.path(o,r),ref);await mkdir(join(p,'..'),{recursive:true});await writeFile(p,id+'\n');}
+ async deleteRef(o:string,r:string,ref:string){await unlink(join(this.path(o,r),ref)).catch(()=>{});}async setHead(o:string,r:string,b:string){await writeFile(join(this.path(o,r),'HEAD'),`ref: refs/heads/${b}\n`);}
+ async run():Promise<never>{throw Error('external git disabled');}
+ async decodePack(o:string,r:string,b:Buffer){if(b.toString('ascii',0,4)!=='PACK')throw Error('bad pack');const count=b.readUInt32BE(8);let p=12;const got=new Map<string,{type:ObjType,data:Buffer}>(),deltas:any[]=[];for(let i=0;i<count;i++){const start=p;let c=b[p++],t=(c>>4)&7,n=c&15,s=4;while(c&128){c=b[p++];n|=(c&127)<<s;s+=7;}let base:string|undefined,offset:number|undefined;if(t===6){c=b[p++];let x=c&127;while(c&128){c=b[p++];x=((x+1)<<7)|(c&127);}offset=start-x;}if(t===7){base=b.subarray(p,p+20).toString('hex');p+=20;}const z=inflateSync(b.subarray(p),{finishFlush:constants.Z_SYNC_FLUSH,info:true} as any);const data=Buffer.from(z.buffer);p+=z.engine.bytesWritten;if(t>=1&&t<=4){const type=NTYPE[t];got.set(sha(rawObject(type,data)),{type,data});}else deltas.push({t,data,base,offset});}
+ for(let pass=0;deltas.length&&pass<20;pass++)for(let i=deltas.length-1;i>=0;i--){const x=deltas[i];let base=x.base?got.get(x.base):undefined;if(!base&&x.offset!==undefined)base=[...got.values()][0];if(!base)continue;const data=applyDelta(base.data,x.data),type=base.type,id=sha(rawObject(type,data));got.set(id,{type,data});deltas.splice(i,1);}if(deltas.length)throw Error('unresolved delta');for(const [id,x] of got)await this.writeObject(o,r,x.type,x.data);return got;}
+ async encodePack(o:string,r:string,wants:string[]){const objects=new Map<string,{type:ObjType,content:Buffer}>();const add=async(id:string)=>{if(objects.has(id))return;const x=await this.readObject(o,r,id);objects.set(id,x);const s=x.content.toString();if(x.type==='commit'){const t=/^tree ([0-9a-f]{40})/m.exec(s)?.[1];if(t)await add(t);for(const m of s.matchAll(/^parent ([0-9a-f]{40})/gm))await add(m[1]);}else if(x.type==='tree'){let p=0;while(p<x.content.length){const z=x.content.indexOf(0,p),name=x.content.subarray(p,z).toString(),id=x.content.subarray(z+1,z+21).toString('hex');p=z+21;if(name)await add(id);}}else if(x.type==='tag'){const t=/^object ([0-9a-f]{40})/m.exec(s)?.[1];if(t)await add(t);}};for(const id of wants)await add(id);const chunks=[Buffer.from('PACK'),Buffer.from([0,0,0,2]),Buffer.alloc(4)];chunks[2].writeUInt32BE(objects.size);for(const x of objects.values())chunks.push(packSize(x.content.length,TYPE[x.type]),deflateSync(x.content));const body=Buffer.concat(chunks);return Buffer.concat([body,createHash('sha1').update(body).digest()]);}
 }
-export const gitStore = new GitStore();
+export const gitStore=new GitStore();

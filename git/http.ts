@@ -1,76 +1,24 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { gunzipSync } from 'node:zlib';
 import { Buffer } from 'node:buffer';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { gitStore, type GitStore } from './store.ts';
-
-const pkt = (s: string) => Buffer.from(`${(Buffer.byteLength(s) + 4).toString(16).padStart(4, '0')}${s}`);
-const flush = Buffer.from('0000');
-const service = (name: string) => Buffer.concat([pkt(`# service=${name}\n`), flush]);
-const pktLines = (b: Buffer) => { const out:string[]=[]; for(let i=0;i+4<=b.length;){const n=parseInt(b.subarray(i,i+4).toString(),16);if(!n){i+=4;continue;}if(n===1||n===2){out.push(n===1?'DELIM':'RESPONSE_END');i+=4;continue;}if(n<4||i+n>b.length)break;out.push(b.subarray(i+4,i+n).toString());i+=n;}return out; };
-const v2Advertisement = () => Buffer.concat([pkt('version 2\n'),pkt('agent=makefun-git/1\n'),pkt('ls-refs=unborn\n'),pkt('fetch=shallow wait-for-done\n'),pkt('server-option\n'),pkt('object-format=sha1\n'),Buffer.from('0001')]);
-export async function handleGitHttp(req: IncomingMessage, res: ServerResponse, owner: string, repo: string, store: GitStore = gitStore): Promise<boolean> {
-  const url = new URL(req.url ?? '/', 'http://localhost'), dir = store.dir(owner, repo);
-  if (!await store.exists(owner, repo)) return false;
-  if (url.pathname.endsWith('/info/refs')) {
-    const svc = url.searchParams.get('service');
-    if (svc !== 'git-upload-pack' && svc !== 'git-receive-pack') { res.writeHead(400); res.end(); return true; }
-    try {
-      if (svc === 'git-upload-pack' && String(req.headers['git-protocol'] || '').includes('version=2')) {
-        res.writeHead(200, { 'content-type': 'application/x-git-upload-pack-advertisement', 'cache-control': 'no-cache' });
-        res.end(v2Advertisement()); return true;
-      }
-      const refs = await store.run(['--git-dir', dir, 'for-each-ref', '--format=%(objectname) %(refname)']);
-      const head = await store.run(['--git-dir', dir, 'symbolic-ref', '-q', 'HEAD']).catch(() => ({ stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) }));
-      const lines = refs.stdout.toString().trim().split('\n').filter(Boolean);
-      const caps = 'report-status report-status-v2 side-band-64k delete-refs quiet ofs-delta';
-      let advertisement: Buffer;
-      if (svc === 'git-receive-pack' && lines.length === 0) {
-        advertisement = Buffer.concat([pkt(`${'0'.repeat(40)} capabilities^{}\0 ${caps}\n`), flush]);
-      } else if (lines.length) {
-        const headRef = head.stdout.toString().trim();
-        const symref = svc === 'git-upload-pack' && headRef ? ' symref=HEAD:' + headRef : '';
-        advertisement = Buffer.concat(lines.map((line, i) => pkt(`${line}${i === 0 ? `\0${svc === 'git-receive-pack' ? ' ' + caps : 'multi_ack_detailed side-band-64k ofs-delta shallow no-progress include-tag' + symref}` : ''}\n`)).concat([flush]));
-      } else if (svc === 'git-receive-pack') {
-        advertisement = Buffer.concat([pkt(`${'0'.repeat(40)} capabilities^{}\0 ${caps}\n`), flush]);
-      } else {
-        const out = await store.run(['--git-dir', dir, 'upload-pack', '--stateless-rpc', '--advertise-refs', dir]);
-        advertisement = out.stdout;
-      }
-      res.writeHead(200, { 'content-type': `application/x-${svc}-advertisement`, 'cache-control': 'no-cache' });
-      res.end(Buffer.concat([service(svc), advertisement]));
-    } catch { res.writeHead(500); res.end(); }
-    return true;
-  }
-  const receive = url.pathname.endsWith('/git-receive-pack');
-  if (!receive && !url.pathname.endsWith('/git-upload-pack')) return false;
-  if (req.method !== 'POST') { res.writeHead(405); res.end(); return true; }
-  const svc = receive ? 'git-receive-pack' : 'git-upload-pack', bufs: Buffer[] = [];
-  try {
-    for await (const b of req) bufs.push(Buffer.from(b));
-    const raw = Buffer.concat(bufs);
-    const body = (req.headers['content-encoding'] || '').toLowerCase() === 'gzip' ? gunzipSync(raw) : raw;
-    if (!receive && String(req.headers['git-protocol'] || '').includes('version=2')) {
-      const lines=pktLines(body), prefixes=lines.filter(x=>x.startsWith('ref-prefix ')).map(x=>x.slice(11));
-      const refs=await store.run(['--git-dir',dir,'for-each-ref','--format=%(objectname) %(refname) %(objecttype)']);
-      const head=await store.run(['--git-dir',dir,'symbolic-ref','-q','HEAD']).catch(()=>({stdout:Buffer.alloc(0),stderr:Buffer.alloc(0)}));
-      const headRef=head.stdout.toString().trim(), out:Buffer[]=[];
-      for(const row of refs.stdout.toString().trim().split('\n').filter(Boolean)){
-        const [oid,name,type]=row.split(' ');if(prefixes.length&&!prefixes.some(p=>name.startsWith(p)))continue;
-        out.push(pkt(`${oid} ${name}${lines.includes('symrefs\n')&&name===headRef?' symref-target:'+headRef:''}\n`));
-        if(lines.includes('peel\n')&&name.startsWith('refs/tags/')&&type==='tag'){
-          const peeled=await store.run(['--git-dir',dir,'rev-parse',`${name}^{}`]).catch(()=>null);if(peeled)out.push(pkt(`${peeled.stdout.toString().trim()} ${name} peeled:${peeled.stdout.toString().trim()}\n`));
-        }
-      }
-      out.push(flush);res.writeHead(200,{'content-type':'application/x-git-upload-pack-result','cache-control':'no-cache'});res.end(Buffer.concat(out));return true;
-    }
-    let stdout: Buffer;
-    if (receive) {
-      stdout = (await store.run(['--git-dir', dir, 'receive-pack', '--stateless-rpc', dir], body)).stdout;
-    } else {
-      stdout = (await store.run(['--git-dir', dir, 'upload-pack', '--stateless-rpc', dir], body)).stdout;
-    }
-    res.writeHead(200, { 'content-type': `application/x-${svc}-result`, 'cache-control': 'no-cache' });
-    res.end(stdout);
-  } catch (e) { res.writeHead(400, { 'content-type': 'text/plain' }); res.end(String(e)); }
-  return true;
-}
+import { createHash } from 'node:crypto';
+import { deflateSync } from 'node:zlib';
+const pkt=(s:string)=>Buffer.from(`${(Buffer.byteLength(s)+4).toString(16).padStart(4,'0')}${s}`), pktb=(b:Buffer)=>Buffer.concat([Buffer.from((b.length+4).toString(16).padStart(4,'0')),b]),flush=Buffer.from('0000');
+const service=(s:string)=>Buffer.concat([pkt(`# service=${s}\n`),flush]);
+const decodePackets=(b:Buffer)=>{const a:string[]=[];for(let i=0;i+4<=b.length;){const n=parseInt(b.subarray(i,i+4).toString(),16);if(!n){i+=4;continue;}if(n===1||n===2){a.push(n===1?'DELIM':'RESPONSE_END');i+=4;continue;}if(n<4||i+n>b.length)break;a.push(b.subarray(i+4,i+n).toString());i+=n;}return a;};
+const caps='report-status report-status-v2 side-band-64k delete-refs quiet ofs-delta';
+function makePack(objects:{type:string,data:Buffer}[]){const z=(n:number)=>{let h=n&15;n>>=4;const a:number[]=[];while(n){a.push(h|128);h=n&127;n>>=7;}a.push(h);return a;};const parts=[Buffer.from('PACK'),Buffer.from([0,0,0,2]),Buffer.from([(objects.length>>>24)&255,(objects.length>>>16)&255,(objects.length>>>8)&255,objects.length&255])];for(const o of objects){const types:any={commit:1,tree:2,blob:3,tag:4},t=types[o.type];let n=o.data.length,first=(t<<4)|(n&15);n>>=4;const h=[first];while(n){h[h.length-1]|=128;h.push(n&127);n>>=7;}parts.push(Buffer.from(h),deflateSync(o.data));}const body=Buffer.concat(parts);return Buffer.concat([body,createHash('sha1').update(body).digest()]);}
+async function peel(store:GitStore,o:string,r:string,id:string){let x=await store.readObject(o,r,id);while(x.type==='tag'){const m=/^object ([0-9a-f]{40})/m.exec(x.content.toString());if(!m)break;id=m[1];x=await store.readObject(o,r,id);}return id;}
+async function ancestors(store:GitStore,o:string,r:string,id:string,seen=new Set<string>()):Promise<Set<string>>{if(seen.has(id))return seen;seen.add(id);try{const x=await store.readObject(o,r,id);if(x.type==='commit')for(const m of x.content.toString().matchAll(/^parent ([0-9a-f]{40})/gm))await ancestors(store,o,r,m[1],seen);}catch{}return seen;}
+async function reachable(store:GitStore,o:string,r:string,id:string,set=new Set<string>()):Promise<Set<string>>{if(set.has(id))return set;set.add(id);try{const x=await store.readObject(o,r,id),s=x.content.toString();if(x.type==='commit'){const t=/^tree ([0-9a-f]{40})/m.exec(s)?.[1];if(t)await reachable(store,o,r,t,set);for(const m of s.matchAll(/^parent ([0-9a-f]{40})/gm))await reachable(store,o,r,m[1],set);}else if(x.type==='tree'){let i=0;while(i<x.content.length){const z=x.content.indexOf(0,i);if(z<0)break;const name=x.content.subarray(i,z).toString(),oid=x.content.subarray(z+1,z+21).toString('hex');i=z+21;if(name)await reachable(store,o,r,oid,set);}}else if(x.type==='tag'){const t=/^object ([0-9a-f]{40})/m.exec(s)?.[1];if(t)await reachable(store,o,r,t,set);}}catch{}return set;}
+export async function handleGitHttp(req:IncomingMessage,res:ServerResponse,owner:string,repo:string,store:GitStore=gitStore):Promise<boolean>{const url=new URL(req.url??'/','http://localhost'),dir=store.dir(owner,repo);if(!await store.exists(owner,repo))return false;
+if(url.pathname.endsWith('/info/refs')){const svc=url.searchParams.get('service');if(svc!=='git-upload-pack'&&svc!=='git-receive-pack'){res.writeHead(400);res.end();return true;}if(svc==='git-upload-pack'&&String(req.headers['git-protocol']||'').includes('version=2')){res.writeHead(200,{'content-type':'application/x-git-upload-pack-advertisement','cache-control':'no-cache'});res.end(Buffer.concat([pkt('version 2\n'),pkt('agent=makefun-git/1\n'),pkt('ls-refs=unborn\n'),pkt('fetch=shallow wait-for-done\n'),pkt('object-format=sha1\n'),Buffer.from('0001')]));return true;}
+const refs=await store.refsMap(owner,repo),real=[...refs].filter(([n,id])=>n!=='HEAD'&&id);const rows:Buffer[]=[];if(svc==='git-receive-pack'&&!real.length)rows.push(pkt(`${'0'.repeat(40)} capabilities^{}\0${caps}\n`));else if(real.length){const head=(await readFile(join(dir,'HEAD'),'utf8').catch(()=>'' )).trim().replace('ref: ','');for(let i=0;i<real.length;i++){const [name,id]=real[i];const capability=i===0?'\0'+(svc==='git-receive-pack'?caps:`multi_ack_detailed side-band-64k ofs-delta shallow no-progress include-tag symref=HEAD:${head}`):'';rows.push(pkt(`${id} ${name}${capability}\n`));if(name.startsWith('refs/tags/'))try{const p=await peel(store,owner,repo,id);if(p!==id)rows.push(pkt(`${p} ${name}^{}\n`));}catch{}}}else if(svc==='git-receive-pack')rows.push(pkt(`${'0'.repeat(40)} capabilities^{}\0${caps}\n`));res.writeHead(200,{'content-type':`application/x-${svc}-advertisement`,'cache-control':'no-cache'});res.end(Buffer.concat([service(svc),...rows,flush]));return true;}
+const receive=url.pathname.endsWith('/git-receive-pack'),upload=url.pathname.endsWith('/git-upload-pack');if(!receive&&!upload)return false;if(req.method!=='POST'){res.writeHead(405);res.end();return true;}const svc=receive?'git-receive-pack':'git-upload-pack',chunks:Buffer[]=[];for await(const b of req)chunks.push(Buffer.from(b));const raw=Buffer.concat(chunks),body=(req.headers['content-encoding']||'').toLowerCase()==='gzip'?gunzipSync(raw):raw,v2=upload&&String(req.headers['git-protocol']||'').includes('version=2');
+if(v2){const lines=decodePackets(body).map(x=>x.replace(/\n$/,''));if(lines.includes('command=fetch')){const want=lines.filter(x=>x.startsWith('want ')).map(x=>x.slice(5).split(' ')[0]),set=new Set<string>();for(const w of want)await reachable(store,owner,repo,w,set);const objects=[];for(const id of set){const x=await store.readObject(owner,repo,id);objects.push({type:x.type,data:x.content});}const pack=makePack(objects),chunks:Buffer[]=[];for(let i=0;i<pack.length;i+=60000)chunks.push(pkt(Buffer.concat([Buffer.from([1]),pack.subarray(i,i+60000)])));res.writeHead(200,{'content-type':'application/x-git-upload-pack-result'});res.end(Buffer.concat([pkt('acknowledgments\n'),pkt('NAK\n'),flush,Buffer.from('0001'),pkt('packfile\n'),pktb(Buffer.concat([Buffer.from([1]),pack])),flush]));return true;}const prefixes=lines.filter(x=>x.startsWith('ref-prefix ')).map(x=>x.slice(11)),refs=await store.refsMap(owner,repo),out:Buffer[]=[];for(const [n,id] of refs){if(n==='HEAD'||!id||prefixes.length&&!prefixes.some(p=>n.startsWith(p)))continue;out.push(pkt(`${id} ${n}\n`));if(lines.includes('peel')&&n.startsWith('refs/tags/'))try{const p=await peel(store,owner,repo,id);if(p!==id)out.push(pkt(`${id} ${n} peeled:${p}\n`));}catch{}}if(lines.includes('symrefs')){const h=(await readFile(join(dir,'HEAD'),'utf8').catch(()=>'' )).trim().slice(5),id=refs.get(h);if(id)out.push(pkt(`${id} HEAD symref-target:${h}\n`));else if(lines.includes('unborn'))out.push(pkt(`unborn HEAD symref-target:${h}\n`));}res.writeHead(200,{'content-type':'application/x-git-upload-pack-result'});res.end(Buffer.concat([...out,flush]));return true;}
+if(receive){const lines=decodePackets(body),commands=lines.filter(x=>/^[0-9a-f]{40} [0-9a-f]{40} refs\//.test(x)),side=commands.some(x=>x.includes('side-band-64k')),pi=body.indexOf(Buffer.from('PACK'));if(pi>=0)await store.decodePack(owner,repo,body.subarray(pi));const results:string[]=[];for(const line of commands){const [oldId,newId,ref]=line.split(/[ \0]/),current=(await store.refsMap(owner,repo)).get(ref)||'0'.repeat(40);if(current!==oldId){results.push(`ng ${ref} stale info`);continue;}if(newId==='0'.repeat(40)){await store.deleteRef(owner,repo,ref);results.push(`ok ${ref}`);continue;}if(current!=='0'.repeat(40)&&!(await ancestors(store,owner,repo,newId)).has(current)){results.push(`ng ${ref} non-fast-forward`);continue;}await store.updateRef(owner,repo,ref,newId);if(ref.startsWith('refs/heads/')){const h=(await readFile(join(dir,'HEAD'),'utf8').catch(()=>'' )).trim();if(!h.startsWith('ref: refs/heads/')||!(await store.refsMap(owner,repo)).get(h.slice(5)))await store.setHead(owner,repo,ref.slice(11));}results.push(`ok ${ref}`);}const report=Buffer.concat([pkt('unpack ok\n'),...results.map(x=>pkt(x+'\n')),flush]);res.writeHead(200,{'content-type':'application/x-git-receive-pack-result'});res.end(side?Buffer.concat([pkt(Buffer.concat([Buffer.from([1]),report]).toString('binary')),flush]):report);return true;}
+const lines=decodePackets(body),wants=lines.filter(x=>x.startsWith('want ')).map(x=>x.split(' ')[1]),side=lines.some(x=>x.includes('side-band-64k'));if(lines.some(x=>x==='command=fetch\n')){const want=lines.filter(x=>x.startsWith('want ')).map(x=>x.slice(5).split(/[ \n]/)[0]);const pack=await store.encodePack(owner,repo,want),nak=pkt('NAK\n'),bandChunks:Buffer[]=[];for(let i=0;i<pack.length;i+=60000)bandChunks.push(pktb(Buffer.concat([Buffer.from([1]),pack.subarray(i,i+60000)])));res.writeHead(200,{'content-type':'application/x-git-upload-pack-result'});res.end(Buffer.concat([pkt('acknowledgments\n'),pkt('NAK\n'),flush,Buffer.from('0001'),pkt('packfile\n'),...bandChunks,flush]));return true;}if(!wants.length){res.writeHead(200,{'content-type':'application/x-git-upload-pack-result'});res.end(flush);return true;}const set=new Set<string>();for(const w of wants)await reachable(store,owner,repo,w,set);const objs=[];for(const id of set){const x=await store.readObject(owner,repo,id);objs.push({type:x.type,data:x.content});}const pack=makePack(objs),nak=pkt('NAK\n'),bandChunks:Buffer[]=[];for(let i=0;i<pack.length;i+=60000)bandChunks.push(pktb(Buffer.concat([Buffer.from([1]),pack.subarray(i,i+60000)])));res.writeHead(200,{'content-type':'application/x-git-upload-pack-result'});res.end(Buffer.concat([nak,...bandChunks,flush]));return true;}
+export { GitStore,gitStore } from './store.ts';
